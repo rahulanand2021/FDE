@@ -87,11 +87,14 @@ def showClaimInPandasDataFrame(claims, labels):
     data = pd.DataFrame(rows)
     print(data)
 
-    home_alone = [claim for claim in claims if claim["claim_id"] == "CLM-1015"][0]
-    decision = labels["CLM-1015"]
+    fig = px.histogram(data, x="claim_type", color="decision", title="Claims by type")
+    fig.show()
+
+    # home_alone = [claim for claim in claims if claim["claim_id"] == "CLM-1015"][0]
+    # decision = labels["CLM-1015"]
 
 
-    print(home_alone)
+    # print(home_alone)
     # print((f"""**{home_alone['summary']}**
 
     # {home_alone['story']}

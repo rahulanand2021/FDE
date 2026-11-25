@@ -17,6 +17,14 @@ import time
 
 DATA = Path("data")
 
+class ClaimDecision(BaseModel):
+    """A claims handler's decision on one claim."""
+
+    rationale: str = Field(description="2-3 sentences to explain the decision along with the relevant section of the policy")
+    decision: Literal["approve", "decline", "refer"]
+    payout: float = Field(description="The amount to pay in US dollars, or 0 for a decline or a referral")
+
+
 def loadAPIKeys():
     global openrouter_api_key
     load_dotenv(override=True)
@@ -99,8 +107,122 @@ def showClaimInPandasDataFrame(claims, labels):
     )
     fig.show()
 
+def loadPolicies(claims, labels):
+    policies = {policy["policy_id"]: policy for policy in load("policies.json")}
+    policy_wording = (DATA / "policy_wording.md").read_text(encoding="utf-8")
+
+    print(f"{len(claims)} claims, {len(labels)} labels, {len(policies)} policies")
+    print(f"The policy wording is {len(policy_wording.split()):,} words")
+    return policies
+
+def make_user_prompt(claim, policies):
+    """The customer's policy record and the claim, as JSON."""
+    policy = policies[claim["policy_id"]]
+
+    return f"""# Policy record
+
+        {json.dumps(policy, indent=2)}
+
+        # Claim
+
+        {json.dumps(claim, indent=2)}
+        """
+
+def make_messages(claim, policies):
+    """Build the messages for one claim: the task and the wording, then the policy record and the claim."""
+
+
+    policy_wording = (DATA / "policy_wording.md").read_text(encoding="utf-8")
+
+    INSTRUCTIONS = """You are a claims handler at UnderCover Travel Insurance.
+    Decide the claim you are given, using the policy wording below and the customer's policy record.
+
+    Choose one decision:
+    - approve: the wording covers the claim and the required documents are attached. Work out the payout using section 10.
+    - decline: the wording does not cover the claim.
+    - refer: a colleague needs to look at it, because a required document is missing, or the story and the documents disagree, or the wording does not settle the question.
+    """
+    SYSTEM_PROMPT = f"""{INSTRUCTIONS}
+    {policy_wording}
+    """
+
+
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": make_user_prompt(claim, policies)},
+    ]
+
+def is_right(answer, label):
+    """True when the decision matches the handler's and the payout is within a dollar."""
+    return answer["decision"] == label["decision"] and abs(answer["payout"] - label["payout"]) <= 1
+
+## Call the LLM
+def decide(claim, policies, model, effort):
+    """Ask one model to decide one claim."""
+    openrouter = openRouterObject()
+    start = time.time()
+    response = openrouter.chat.completions.parse(
+        model=model,
+        messages=make_messages(claim, policies),
+        response_format=ClaimDecision,
+        reasoning_effort=effort,
+        extra_body={"provider": {"require_parameters": True}},
+    )
+    answer = response.choices[0].message.parsed
+    return {
+        "model": model,
+        "effort": effort,
+        "technique": "LLM",
+        "claim_id": claim["claim_id"],
+        "decision": answer.decision,
+        "payout": answer.payout,
+        "rationale": answer.rationale,
+        "cost": response.usage.cost,
+        "seconds": round(time.time() - start, 1),
+    }
+
+def run(model, policies, effort, claims, labels):
+    """Run the model on the claims and compare against the labels."""
+    results = []
+    for claim in claims:
+        answer = decide(claim, policies, model, effort)
+        label = labels[claim["claim_id"]]
+        results.append({**answer, "difficulty": label["difficulty"], "right": is_right(answer, label)})
+    right = sum(result["right"] for result in results)
+    cost = sum(result["cost"] for result in results)
+    seconds = sum(result["seconds"] for result in results)
+    print(f"{model} at {effort}: {right} of {len(results)} right for ${cost:.4f} in {seconds:.0f} seconds")
+    return results
+
+def show_misses(results, labels):
+    """Show each claim in a set of results that the model got wrong, with its rationale and the handler's reason."""
+    for result in results:
+        if not result["right"]:
+            label = labels[result["claim_id"]]
+            print((f"""**{result['claim_id']}, {label['difficulty']}**: {result['decision']} ${result['payout']:,.2f}, where the handler said {label['decision']} ${label['payout']:,.2f}
+
+        - Model: {result['rationale']}
+        - Handler: {label['reason']}
+        - Tests: {label['tests']}
+        """))
+            
 if __name__ == "__main__":
     loadAPIKeys()
     # testOpenRouter()
     claims, labels = peekSampleData()
-    showClaimInPandasDataFrame(claims, labels)
+    policies = loadPolicies(claims, labels)
+    # pol1 = make_user_prompt(claims[0],policies)
+    # print(pol1)
+    # message = make_messages(claims[0], policies)
+    # print(message)
+    # showClaimInPandasDataFrame(claims, labels)
+
+    # first = decide(claims[0], policies, "openai/gpt-6-luna", "low")
+    # print(first)
+
+    # luna_low  = run("openai/gpt-6-luna", policies, "low", claims, labels)
+    # luna_medium  = run("openai/gpt-6-luna", policies, "medium", claims, labels)
+    # scored = pd.DataFrame(luna_low + luna_medium)
+    # print(scored.pivot_table(index=["model", "effort"], columns="difficulty", values="right", aggfunc="sum", sort=False))
+    # show_misses(luna_low, labels)
+    # sol = run("openai/gpt-6-sol", policies, "high", claims, labels)

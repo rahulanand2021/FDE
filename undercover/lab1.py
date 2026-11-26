@@ -205,7 +205,35 @@ def show_misses(results, labels):
         - Handler: {label['reason']}
         - Tests: {label['tests']}
         """))
-            
+def decide_with_jev(claim, policies):
+    """Ask Jev for the decision on one claim, with its confidence."""
+    openrouter_decisions = OpenRouter(api_key=openrouter_api_key, timeout_ms=60_000)
+    policy_wording = (DATA / "policy_wording.md").read_text(encoding="utf-8")
+
+    JEV = "typesafe/jev-1.14"
+    JEV_QUESTION = {
+    "type": "choice",
+    "instructions": "You are a claims handler at UnderCover Travel Insurance. Decide `claim` using `policy_wording` and the customer's `policy` record.",
+    "criteria": {
+        "approve": "The wording covers the claim and the required documents are attached.",
+        "decline": "The wording does not cover the claim.",
+        "refer": "A colleague needs to look at it, because a required document is missing, or the story and the documents disagree, or the wording does not settle the question.",
+        },
+    }
+    state = {"policy_wording": policy_wording, "policy": policies[claim["policy_id"]], "claim": claim}
+    start = time.time()
+    response = openrouter_decisions.alpha.decisions.create(model=JEV, state=state, questions={"decision": JEV_QUESTION})
+    answer = response.answers["decision"]
+    return {
+        "claim_id": claim["claim_id"],
+        "decision": answer.choice,
+        "confidence": answer.confidence,
+        "right": answer.choice == labels[claim["claim_id"]]["decision"],
+        "cost": response.usage.cost,
+        "seconds": round(time.time() - start, 2),
+    }
+
+
 if __name__ == "__main__":
     loadAPIKeys()
     # testOpenRouter()
@@ -226,3 +254,10 @@ if __name__ == "__main__":
     # print(scored.pivot_table(index=["model", "effort"], columns="difficulty", values="right", aggfunc="sum", sort=False))
     # show_misses(luna_low, labels)
     # sol = run("openai/gpt-6-sol", policies, "high", claims, labels)
+    jev = pd.DataFrame([decide_with_jev(claim, policies) for claim in claims])
+    # luna_decisions_right = sum(result["decision"] == labels[result["claim_id"]]["decision"] for result in luna_low)
+
+    print(f"Jev: {jev['right'].sum()} of {len(jev)} decisions right for ${jev['cost'].sum():.4f} in {jev['seconds'].sum():.0f} seconds")
+    # print(f"Luna at low: {luna_decisions_right} of {len(luna_low)} decisions right")
+    jev["confident"] = jev["confidence"] >= 0.9
+    print(jev.groupby("confident")["right"].agg(["sum", "count"]))
